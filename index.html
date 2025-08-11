@@ -1,0 +1,298 @@
+<!--
+  Veltrax — Real-Time Approval Lift (Same Loss)
+  Single-file GitHub Page · No external deps · Responsive
+  What it shows: extra approved loans/cards at the same portfolio loss after unified scoring.
+  Inputs: apps/day, approval rate, avg margin, current loss rate, AUC uplift (+ optional baseline AUC), one-time cost.
+  Outputs: incremental approvals, incremental margin/day, approval lift %, days to payback; ROC-style curve.
+  Method: Binormal ROC model. AUC -> d' (separation). We infer baseline threshold and applicant bad-rate from
+          observed approval rate + loss rate. Then apply (AUC + uplift) and find a new threshold that keeps the
+          portfolio loss rate constant; approvals rise. Profit ≈ Δapprovals · avgMargin. Days to payback uses
+          provided one-time cost.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Veltrax — Approval Lift (Same Loss)</title>
+  <style>
+    :root{
+      --vx-primary:#4c8dff; --vx-bg:#131417; --vx-surface:#1b1d23; --vx-surface-2:#20232b;
+      --vx-border:#2c2f36; --vx-text:#e6e7eb; --vx-muted:#9aa1b3; --vx-good:#4cff88; --vx-danger:#ff453a; --vx-ring:rgba(76,141,255,.45);
+    }
+    *,*::before,*::after{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial;color:var(--vx-text);
+      background:radial-gradient(1000px 400px at 50% -200px, rgba(111,66,193,.25), transparent 60%), var(--vx-bg)}
+    .container{max-width:1200px;margin:0 auto;padding:0 24px}
+    .hero{padding:36px 0 8px}
+    .hero h1{margin:8px 0 6px;font-size:40px;line-height:1.15}
+    .muted{color:var(--vx-muted)}
+    .grid{display:grid;gap:16px}
+    .row{display:grid;gap:16px}
+    @media(min-width:980px){.row.cols-2{grid-template-columns:1.1fr .9fr}}
+    .card{background:linear-gradient(180deg,var(--vx-surface),var(--vx-surface-2));border:1px solid var(--vx-border);border-radius:16px;padding:20px;box-shadow:0 1px 0 rgba(0,0,0,.25)}
+    label{font-size:14px;font-weight:600;display:block;margin-bottom:6px}
+    label small{display:block;color:var(--vx-muted);font-weight:400;margin-top:4px}
+    input[type="range"]{width:100%}
+    input[type="number"]{width:160px;background:#151821;border:1px solid var(--vx-border);border-radius:10px;color:var(--vx-text);padding:10px;font-size:15px}
+    .kpi-grid{display:grid;gap:14px}
+    @media(min-width:640px){.kpi-grid{grid-template-columns:repeat(2,1fr)}}
+    @media(min-width:1040px){.kpi-grid{grid-template-columns:repeat(4,1fr)}}
+    .kpi{background:#16181f;border:1px solid var(--vx-border);border-radius:12px;padding:16px}
+    .kpi .label{font-size:12px;color:var(--vx-muted);margin-bottom:6px}
+    .kpi .value{font-size:24px;font-weight:800;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .chart{height:400px;border:1px solid var(--vx-border);border-radius:14px;position:relative;background:#0f1219}
+    .legend{display:flex;gap:14px;position:absolute;bottom:12px;left:12px;font-size:12px;color:var(--vx-muted);flex-wrap:wrap}
+    .dot{display:inline-block;width:10px;height:10px;border-radius:50%}
+    .c1{background:var(--vx-primary)} .c2{background:var(--vx-good)} .c3{background:var(--vx-danger)} .c4{background:#aaa}
+    .pill{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--vx-border);padding:6px 10px;border-radius:999px;background:#181a21;font-size:13px}
+    .pill.active{border-color:var(--vx-primary);box-shadow:0 0 0 3px var(--vx-ring)}
+    details{background:#12151c;border:1px dashed var(--vx-border);border-radius:12px;padding:12px}
+    footer{border-top:1px solid var(--vx-border);margin-top:32px;padding:24px 0 48px}
+  </style>
+</head>
+<body>
+  <header class="container hero">
+    <div style="display:flex;align-items:center;gap:10px">
+      <svg width="22" height="22" viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="10" width="52" height="12" rx="6" fill="#fff"/><rect x="6" y="30" width="42" height="12" rx="6" fill="#fff"/><rect x="6" y="50" width="26" height="8" rx="4" fill="#6F42C1"/></svg>
+      <span class="muted" style="letter-spacing:.2em;font-size:11px">VELTRAX</span>
+    </div>
+    <h1>Real‑Time Approval Lift — Same Portfolio Loss</h1>
+    <p class="muted" style="max-width:820px">Unified, local scoring approves more good customers without increasing portfolio loss. Adjust the assumptions and see the lift.
+    </p>
+  </header>
+
+  <main class="container row cols-2" style="align-items:start">
+    <!-- Controls -->
+    <section class="card">
+      <h2 style="margin:0 0 10px;font-size:18px">Assumptions</h2>
+      <div class="grid" style="grid-template-columns:1fr 1fr;gap:14px">
+        <div>
+          <label>Applications per day (<span id="out-apps">200,000</span>)<small>Total inbound apps/cards</small></label>
+          <input id="in-apps" type="range" min="10000" max="2000000" step="1000" value="200000" />
+        </div>
+        <div>
+          <label>Approval rate (<span id="out-approve">40%</span>)<small>Current approvals as a share of apps</small></label>
+          <input id="in-approve" type="range" min="5" max="95" step="1" value="40" />
+        </div>
+        <div>
+          <label>Avg margin per approved ($)<small>Net present value per good approval</small></label>
+          <input id="in-margin" type="number" min="0" step="1" value="120" />
+        </div>
+        <div>
+          <label>Current loss rate (<span id="out-loss">5.0%</span>)<small>Defaults/charge‑offs among approved</small></label>
+          <input id="in-loss" type="range" min="0.5" max="20" step="0.1" value="5" />
+        </div>
+        <div>
+          <label>AUC uplift (ΔAUC = <span id="out-aucu">0.06</span>)<small>Unified scoring improvement</small></label>
+          <input id="in-aucu" type="range" min="0" max="0.15" step="0.005" value="0.06" />
+        </div>
+        <div>
+          <label>One‑time implementation cost ($)<small>Used for payback period</small></label>
+          <input id="in-cost" type="number" min="0" step="1000" value="180000" />
+        </div>
+      </div>
+      <details style="margin-top:12px">
+        <summary class="pill">Advanced: baseline AUC (<span id="out-auc0">0.70</span>)</summary>
+        <div style="margin-top:10px">
+          <input id="in-auc0" type="range" min="0.55" max="0.85" step="0.005" value="0.70" />
+          <div class="muted" style="font-size:12px;margin-top:6px">Used with a binormal ROC model (equal variance). We infer the baseline threshold and applicant bad‑rate from your approval and loss rates.</div>
+        </div>
+      </details>
+    </section>
+
+    <!-- Results -->
+    <section class="card">
+      <h2 style="margin:0 0 10px;font-size:18px">Results</h2>
+      <div class="kpi-grid" aria-live="polite">
+        <div class="kpi"><div class="label">Incremental approvals / day</div><div id="k-approvals" class="value">—</div></div>
+        <div class="kpi"><div class="label">Incremental margin / day</div><div id="k-margin" class="value">—</div></div>
+        <div class="kpi"><div class="label">Approval lift (same loss)</div><div id="k-lift" class="value">—</div></div>
+        <div class="kpi"><div class="label">Days to payback</div><div id="k-payback" class="value">—</div></div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <div class="muted" style="font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div>Baseline operating point: <span id="op-base" style="color:#fff"></span></div>
+          <div>Unified operating point: <span id="op-new" style="color:#fff"></span></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <section class="container card" style="margin-top:18px">
+    <h2 style="margin:0 0 10px;font-size:18px">ROC — discrimination improves, approvals rise (loss held constant)</h2>
+    <div class="chart">
+      <svg id="roc" role="img" aria-label="ROC curves for baseline and unified models"></svg>
+      <div class="legend">
+        <span><i class="dot c1"></i> Baseline AUC</span>
+        <span><i class="dot c2"></i> Unified (AUC+uplift)</span>
+        <span><i class="dot c3"></i> Operating points</span>
+        <span><i class="dot c4"></i> 45° reference</span>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container" style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:10px">
+        <svg width="22" height="22" viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="10" width="52" height="12" rx="6" fill="#fff"/><rect x="6" y="30" width="42" height="12" rx="6" fill="#fff"/><rect x="6" y="50" width="26" height="8" rx="4" fill="#6F42C1"/></svg>
+        <span class="muted" style="letter-spacing:.2em;font-size:11px">VELTRAX</span>
+      </div>
+      <div class="muted">Local‑first. Private by default. Built for operators who need provable ROI.</div>
+    </div>
+  </footer>
+
+  <script>
+    // ─────────── Math helpers (Φ, Φ⁻¹) ───────────
+    function stdNormalCDF(x){
+      // Abramowitz & Stegun 7.1.26
+      const t = 1/(1+0.2316419*Math.abs(x));
+      const d = 0.3989422804014327*Math.exp(-x*x/2);
+      let prob = 1 - d*(1.330274429*t - 1.821255978*Math.pow(t,2) + 1.781477937*Math.pow(t,3) - 0.356563782*Math.pow(t,4) + 0.319381530*Math.pow(t,5));
+      return x>=0 ? prob : 1-prob;
+    }
+    function stdNormalInv(p){
+      // Peter John Acklam's approximation
+      if(p<=0||p>=1) return NaN;
+      const a=[-3.969683028665376e+01,2.209460984245205e+02,-2.759285104469687e+02,1.383577518672690e+02,-3.066479806614716e+01,2.506628277459239e+00];
+      const b=[-5.447609879822406e+01,1.615858368580409e+02,-1.556989798598866e+02,6.680131188771972e+01,-1.328068155288572e+01];
+      const c=[-7.784894002430293e-03,-3.223964580411365e-01,-2.400758277161838e+00,-2.549732539343734e+00,4.374664141464968e+00,2.938163982698783e+00];
+      const d=[7.784695709041462e-03,3.224671290700398e-01,2.445134137142996e+00,3.754408661907416e+00];
+      const plow=0.02425, phigh=1-plow;
+      let q, r;
+      if(p<plow){ q=Math.sqrt(-2*Math.log(p)); return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])/((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1); }
+      if(phigh<p){ q=Math.sqrt(-2*Math.log(1-p)); return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])/((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1); }
+      q=p-0.5; r=q*q; return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q/(((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1);
+    }
+    const aucToD = auc => Math.SQRT2 * stdNormalInv(auc);
+    const rocTPR = (fpr, auc) => {
+      const d = aucToD(auc);
+      const t = stdNormalCDF(stdNormalInv(fpr) + d);
+      return Math.min(1, Math.max(0, t));
+    };
+
+    // ─────────── Core model ───────────
+    function solveBaselineFPR(approval, loss, auc){
+      // Given approval rate a0 and loss L0 (among approvals), find FPR at baseline AUC
+      const b = approval*loss; // share of all apps that are bad approvals
+      const eps = 1e-6; let lo = Math.max(b+eps, 1e-6), hi = 0.999999;
+      const f = x => { const t=rocTPR(x,auc); return b + t*(1 - b/x) - approval; };
+      // bracket
+      let flo=f(lo), fhi=f(hi);
+      if(flo*fhi>0){
+        let prevx=lo, prevf=flo, found=false;
+        for(let i=1;i<=200;i++){ const x=lo+(hi-lo)*i/200, fx=f(x); if(fx*prevf<=0){ lo=prevx; hi=x; found=true; break;} prevx=x; prevf=fx; }
+        if(!found) return Math.min(0.95, Math.max(lo, b+0.05));
+      }
+      for(let i=0;i<80;i++){ const mid=(lo+hi)/2, fm=f(mid); (fm>0?hi:lo)=mid; }
+      return (lo+hi)/2;
+    }
+    function lossAt(x,p,auc){ const t=rocTPR(x,auc); return (x*p)/(x*p + t*(1-p)); }
+    function solveFPRforLoss(p, auc, Ltarget, start){
+      let lo = Math.max(start, 1e-6), hi = 0.999999; // with better model we expect x_new >= x_base
+      const g = x => lossAt(x,p,auc) - Ltarget;
+      let glo=g(lo), ghi=g(hi);
+      if(glo*ghi>0){ // expand a bit downwards if needed
+        lo = Math.max(1e-6, lo*0.5); glo=g(lo);
+      }
+      for(let i=0;i<80;i++){ const mid=(lo+hi)/2, gm=g(mid); (gm>0?hi:lo)=mid; }
+      return (lo+hi)/2;
+    }
+
+    // ─────────── UI wiring ───────────
+    const $ = s=>document.querySelector(s);
+    const money = n=>n.toLocaleString(undefined,{style:'currency',currency:'USD',maximumFractionDigits:0});
+    const fmt   = n=>n.toLocaleString(undefined,{maximumFractionDigits:0});
+    const pct   = v=> (v*100).toFixed(1)+"%";
+
+    const state = { apps:200000, approve:0.40, margin:120, loss:0.05, auc0:0.70, auclift:0.06, cost:180000 };
+
+    // Inputs → state
+    function bind(){
+      $('#in-apps').addEventListener('input',e=>{ state.apps=parseInt(e.target.value); $('#out-apps').textContent=fmt(state.apps); recalc(); });
+      $('#in-approve').addEventListener('input',e=>{ state.approve=parseInt(e.target.value)/100; $('#out-approve').textContent=Math.round(state.approve*100)+'%'; recalc(); });
+      $('#in-margin').addEventListener('input',e=>{ state.margin=parseFloat(e.target.value||0); recalc(); });
+      $('#in-loss').addEventListener('input',e=>{ state.loss=parseFloat(e.target.value)/100; $('#out-loss').textContent=(parseFloat(e.target.value)).toFixed(1)+'%'; recalc(); });
+      $('#in-aucu').addEventListener('input',e=>{ state.auclift=parseFloat(e.target.value); $('#out-aucu').textContent=state.auclift.toFixed(3); recalc(); });
+      $('#in-auc0').addEventListener('input',e=>{ state.auc0=parseFloat(e.target.value); $('#out-auc0').textContent=state.auc0.toFixed(2); recalc(); });
+      $('#in-cost').addEventListener('input',e=>{ state.cost=parseFloat(e.target.value||0); recalc(); });
+    }
+
+    function recalc(){
+      const {apps, approve:a0, loss:L0, auc0, auclift, margin, cost} = state;
+      const auc1 = Math.min(0.999, Math.max(0.501, auc0 + auclift));
+      // 1) infer baseline FPR
+      const x0 = solveBaselineFPR(a0, L0, auc0); // FPR
+      const t0 = rocTPR(x0, auc0);
+      const b = a0*L0;           // share of all apps that are bad approvals
+      const p = Math.min(0.999, Math.max(1e-6, b / x0)); // applicant bad rate
+      // 2) find new threshold (same portfolio loss L0 at improved AUC)
+      const x1 = solveFPRforLoss(p, auc1, L0, x0);
+      const t1 = rocTPR(x1, auc1);
+      const a1 = x1*p + t1*(1-p); // new approval rate
+
+      const incApprovalRate = Math.max(0, a1 - a0);
+      const incApprovalsDay = apps * incApprovalRate;
+      const incMarginDay = incApprovalsDay * margin; // all incremental approvals are net-good at same loss
+      const liftPct = a0>0 ? (incApprovalRate/a0*100) : 0;
+      const payback = incMarginDay>0 ? Math.ceil(cost / incMarginDay) : Infinity;
+
+      $('#k-approvals').textContent = fmt(Math.round(incApprovalsDay));
+      $('#k-margin').textContent    = money(incMarginDay);
+      $('#k-lift').textContent      = liftPct.toFixed(1) + '%';
+      $('#k-payback').textContent   = isFinite(payback)? payback + ' days' : '—';
+
+      $('#op-base').textContent = `FPR ${ (x0*100).toFixed(2) }% · TPR ${ (t0*100).toFixed(2) }% · Approvals ${ (a0*100).toFixed(2) }%`;
+      $('#op-new').textContent  = `FPR ${ (x1*100).toFixed(2) }% · TPR ${ (t1*100).toFixed(2) }% · Approvals ${ (a1*100).toFixed(2) }%`;
+
+      drawROC({auc0, auc1, x0, t0, x1, t1});
+    }
+
+    // ─────────── ROC chart (SVG) ───────────
+    function drawROC(m){
+      const svg = document.getElementById('roc');
+      while(svg.firstChild) svg.removeChild(svg.firstChild);
+      const parent = svg.parentElement; const W = Math.max(560, parent.clientWidth); const H = 400; const P = 50;
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+      const NS='http://www.w3.org/2000/svg';
+      const toXY = (fpr,tpr)=>({ x:P + fpr*(W-2*P), y:H-P - tpr*(H-2*P) });
+      const grid = document.createElementNS(NS,'g'); grid.setAttribute('opacity','.9'); svg.appendChild(grid);
+
+      // Axes
+      const ax = document.createElementNS(NS,'path');
+      ax.setAttribute('d',`M ${P} ${H-P} L ${W-P} ${H-P} M ${P} ${H-P} L ${P} ${P}`);
+      ax.setAttribute('stroke','var(--vx-border)'); ax.setAttribute('fill','none'); grid.appendChild(ax);
+      // 45-degree reference
+      const ref = document.createElementNS(NS,'line');
+      ref.setAttribute('x1',P); ref.setAttribute('y1',H-P); ref.setAttribute('x2',W-P); ref.setAttribute('y2',P);
+      ref.setAttribute('stroke','#888'); ref.setAttribute('stroke-dasharray','4 6'); ref.setAttribute('opacity','.5'); svg.appendChild(ref);
+
+      const label=(x,y,txt)=>{ const t=document.createElementNS(NS,'text'); t.setAttribute('x',x); t.setAttribute('y',y); t.setAttribute('fill','var(--vx-muted)'); t.setAttribute('font-size','12'); t.textContent=txt; svg.appendChild(t); };
+      label(W/2, H-14, 'False Positive Rate (bad approvals ÷ bad applicants)');
+      label(8, P-8, 'True Positive Rate');
+
+      function plotROC(auc,color){
+        const d = aucToD(auc);
+        let dstr='';
+        for(let i=0;i<=100;i++){
+          const fpr=i/100; const tpr=stdNormalCDF(stdNormalInv(fpr)+d); const {x,y}=toXY(fpr,tpr);
+          dstr += (i? 'L':'M')+` ${x} ${y} `;
+        }
+        const p=document.createElementNS(NS,'path'); p.setAttribute('d',dstr); p.setAttribute('fill','none'); p.setAttribute('stroke',color); p.setAttribute('stroke-width','2'); svg.appendChild(p);
+      }
+      plotROC(m.auc0,'var(--vx-primary)');
+      plotROC(m.auc1,'var(--vx-good)');
+
+      function point(fpr,tpr,stroke){ const {x,y}=toXY(fpr,tpr); const c=document.createElementNS(NS,'circle'); c.setAttribute('cx',x); c.setAttribute('cy',y); c.setAttribute('r','5'); c.setAttribute('fill','var(--vx-danger)'); c.setAttribute('stroke',stroke); c.setAttribute('stroke-width','2'); svg.appendChild(c); }
+      point(m.x0,m.t0,'var(--vx-primary)');
+      point(m.x1,m.t1,'var(--vx-good)');
+    }
+
+    bind();
+    recalc();
+    window.addEventListener('resize', recalc);
+  </script>
+</body>
+</html>
